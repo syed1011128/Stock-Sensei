@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Stock Sensei — Inline SVG Charts</title>
+
+    <!-- React / ReactDOM (UMD) -->
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+    <!-- Babel for JSX in the browser (dev only) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+    <style>
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;padding:20px}
+        .app-container{max-width:1100px;margin:0 auto}
+        .header{background:white;padding:20px;border-radius:10px;margin-bottom:16px;text-align:center}
+        .header h1{color:#667eea}
+        .loading{color:#fff;padding:30px;text-align:center}
+        .market-summary{display:flex;gap:12px;margin-bottom:12px}
+        .summary-card{background:white;padding:12px;border-radius:8px;flex:1}
+        .controls{background:white;padding:12px;border-radius:8px;margin-bottom:12px;display:flex;gap:8px;align-items:center}
+        .stock-table{background:white;padding:0;border-radius:8px;overflow:hidden}
+        table{width:100%;border-collapse:collapse}
+        th,td{padding:10px;border-bottom:1px solid #eee;text-align:left}
+        .badge{background:#eee;padding:4px 8px;border-radius:6px;font-size:12px}
+        .chart-area{background:white;padding:12px;border-radius:8px;margin-bottom:12px}
+        .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+        @media (max-width:800px){ .grid-2{grid-template-columns:1fr} }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+    (function(){
+      const { useState, useEffect } = React;
+
+      // tiny utility to coerce numeric fields
+      function coerceStock(s) {
+        return {
+          symbol: s.symbol,
+          name: s.name || '',
+          currentPrice: Number(s.currentPrice ?? s.current_price ?? 0),
+          previousClose: Number(s.previousClose ?? s.previous_close ?? 0),
+          priceChange: Number(s.priceChange ?? 0),
+          priceChangePercent: Number(s.priceChangePercent ?? 0),
+          volume: Number(s.volume ?? 0),
+          volatility: Number(s.volatility ?? 0),
+          sector: s.sector ?? 'Unknown'
+        };
+      }
+
+      // Simple inline SVG bar chart — no external libs
+      function SimpleBarChart({ data, label, valueKey, height = 240, showValues = true }) {
+        // data: [{name, value}, ...]
+        const padding = 16;
+        const barGap = 10;
+        const labelWidth = 40;
+        // derive max value (use absolute for percent chart to show both directions)
+        const maxVal = Math.max(...data.map(d => Math.abs(Number(d[valueKey]) || 0)), 1);
+
+        const barCount = data.length;
+        const totalGap = Math.max(0, (barCount - 1) * barGap);
+        const availableWidth = 900; // viewBox width (responsive via viewBox)
+        const barWidth = Math.max(6, (availableWidth - padding * 2 - totalGap - labelWidth) / Math.max(1, barCount));
+
+        // scale function
+        const scale = (v) => ( (Math.abs(v) / maxVal) * (height - 40) );
+
+        // build bars centered vertically (for signed values we show center axis)
+        const viewBoxWidth = labelWidth + padding * 2 + (barWidth * barCount) + totalGap;
+        const centerY = 20 + (height - 40) / 2; // vertical center for 0
+
+        return (
+          <div className="chart-area">
+            <strong style={{display:'block', marginBottom:8}}>{label}</strong>
+            <svg viewBox={`0 0 ${viewBoxWidth} ${height}`} width="100%" height={height} preserveAspectRatio="xMidYMid meet">
+              {/* light grid / axis */}
+              <line x1={padding} x2={viewBoxWidth - padding} y1={centerY} y2={centerY} stroke="#eee" strokeWidth="1" />
+              {data.map((d, i) => {
+                const x = labelWidth + padding + i * (barWidth + barGap);
+                const val = Number(d[valueKey]) || 0;
+                const h = scale(val);
+                // if val >=0 draw upward from center; else draw downward from center
+                const y = val >= 0 ? centerY - h : centerY;
+                const barHeight = Math.max(1, h);
+                const fill = val >= 0 ? '#10b981' : '#ef4444';
+
+                return (
+                  <g key={d.name || i}>
+                    <rect x={x} y={y} width={barWidth} height={barHeight} fill={fill} rx="3" />
+                    {/* label */}
+                    <text x={x + barWidth / 2} y={height - 6} fontSize="10" fill="#333" textAnchor="middle">{d.name}</text>
+                    {showValues ? (
+                      <text x={x + barWidth / 2} y={val >= 0 ? y - 6 : y + barHeight + 12} fontSize="10" fill="#333" textAnchor="middle">
+                        {Number(val).toFixed(2)}
+                      </text>
+                    ) : null}
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        );
+      }
+
+      function App() {
+        const [stocks, setStocks] = useState([]);
+        const [summary, setSummary] = useState({ totalStocks: 0, avgChange: 0, totalVolume: 0, gainers: 0, losers: 0 });
+        const [loading, setLoading] = useState(true);
+        const [topK, setTopK] = useState(10);
+        const [searchQuery, setSearchQuery] = useState('');
+        const [sortBy, setSortBy] = useState('priceChange');
+
+        useEffect(() => {
+          // demo data
+          const sectors = ['Technology','Finance','Healthcare','Energy','Retail'];
+          const symbols = ['AAPL','MSFT','GOOGL','TSLA','AMZN','META','NVDA','JPM','BAC','V'];
+          const names = ['Apple Inc.','Microsoft Corp.','Alphabet Inc.','Tesla Inc.','Amazon.com','Meta','NVIDIA','JPMorgan','Bank of America','Visa'];
+
+          const demo = symbols.slice(0,5).map((s,i) => {
+            const current = +(100 + Math.random()*400).toFixed(2);
+            const prev = +(50 + Math.random()*400).toFixed(2);
+            const change = +(current - prev).toFixed(2);
+            const percent = +((change / (prev || 1)) * 100).toFixed(2);
+            return coerceStock({
+              symbol: s,
+              name: names[i],
+              currentPrice: current,
+              previousClose: prev,
+              priceChange: change,
+              priceChangePercent: percent,
+              volume: Math.floor(100000 + Math.random()*900000),
+              volatility: +(Math.random()*5).toFixed(2),
+              sector: sectors[i % sectors.length]
+            });
+          });
+
+          setStocks(demo);
+          setSummary({
+            totalStocks: demo.length,
+            avgChange: demo.reduce((a,b)=>a+b.priceChangePercent,0)/demo.length,
+            totalVolume: demo.reduce((a,b)=>a+b.volume,0),
+            gainers: demo.filter(s=>s.priceChange>0).length,
+            losers: demo.filter(s=>s.priceChange<0).length
+          });
+          setLoading(false);
+        }, []);
+
+        const formatNumber = (num) => {
+          const n = Number(num) || 0;
+          if (n >= 1_000_000) return (n/1_000_000).toFixed(2) + 'M';
+          if (n >= 1000) return (n/1000).toFixed(2) + 'K';
+          return n.toString();
+        };
+
+        const filtered = stocks.filter(s =>
+          !searchQuery.trim() ||
+          (s.symbol && s.symbol.toLowerCase().includes(searchQuery.toLowerCase())) ||
+          (s.name && s.name.toLowerCase().includes(searchQuery.toLowerCase()))
+        );
+
+        // sort logic (basic)
+        filtered.sort((a,b) => {
+          if (sortBy === 'priceChange') return b.priceChangePercent - a.priceChangePercent;
+          if (sortBy === 'volume') return b.volume - a.volume;
+          if (sortBy === 'volatility') return b.volatility - a.volatility;
+          if (sortBy === 'price') return b.currentPrice - a.currentPrice;
+          return 0;
+        });
+
+        const topStocks = filtered.slice(0, topK);
+        const chartData = topStocks.map(s => ({ name: s.symbol, change: Number(s.priceChangePercent) || 0, volume: Number(s.volume) || 0 }));
+
+        return (
+          <div className="app-container">
+            <div className="header">
+              <h1>📈 Stock Sensei</h1>
+              <p>Inline SVG charts — no external chart library needed</p>
+            </div>
+
+            {loading ? <div className="loading">Loading demo data...</div> : null}
+
+            <div className="market-summary">
+              <div className="summary-card">
+                <h4>Total Stocks</h4>
+                <div style={{fontSize:20,fontWeight:700}}>{summary.totalStocks}</div>
+              </div>
+              <div className="summary-card">
+                <h4>Avg %</h4>
+                <div style={{fontSize:20,fontWeight:700}}>{Number(summary.avgChange).toFixed(2)}%</div>
+              </div>
+              <div className="summary-card">
+                <h4>Volume</h4>
+                <div style={{fontSize:20,fontWeight:700}}>{formatNumber(summary.totalVolume)}</div>
+              </div>
+            </div>
+
+            <div className="grid-2">
+              <SimpleBarChart data={chartData.map(d=>({name:d.name, value:d.change, change:d.change}))} label="Top Performers - Price Change %" valueKey="change" />
+              <SimpleBarChart data={chartData.map(d=>({name:d.name, value:d.volume/1_000_000, volume:d.volume/1_000_000}))} label="Trading Volume (Millions)" valueKey="volume" />
+            </div>
+
+            <div className="controls">
+              <div>
+                <label>Sort By: </label>
+                <select value={sortBy} onChange={e => setSortBy(e.target.value)}>
+                  <option value="priceChange">Price Change %</option>
+                  <option value="volume">Volume</option>
+                  <option value="volatility">Volatility</option>
+                  <option value="price">Current Price</option>
+                </select>
+              </div>
+              <div>
+                <label>Show Top: </label>
+                <select value={topK} onChange={e => setTopK(Number(e.target.value))}>
+                  <option value={5}>5</option>
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                </select>
+              </div>
+              <div style={{flex:1}}>
+                <input type="text" placeholder="Search stocks..." value={searchQuery} onChange={(e)=>setSearchQuery(e.target.value)} style={{width:'100%',padding:8}} />
+              </div>
+            </div>
+
+            <div className="stock-table">
+              <table>
+                <thead>
+                  <tr><th>#</th><th>Symbol</th><th>Name</th><th>Price</th><th>Change</th><th>Change %</th><th>Volume</th><th>Sector</th></tr>
+                </thead>
+                <tbody>
+                  {topStocks.map((stock, index) => (
+                    <tr key={stock.symbol || index}>
+                      <td>{index + 1}</td>
+                      <td style={{fontWeight:700,color:'#667eea'}}>{stock.symbol}</td>
+                      <td>{stock.name}</td>
+                      <td>${Number(stock.currentPrice).toFixed(2)}</td>
+                      <td style={{color: stock.priceChange >= 0 ? '#10b981' : '#ef4444', fontWeight:600}}>
+                        {stock.priceChange >= 0 ? '+' : ''}${Number(stock.priceChange).toFixed(2)}
+                      </td>
+                      <td style={{color: stock.priceChangePercent >= 0 ? '#10b981' : '#ef4444', fontWeight:600}}>
+                        {stock.priceChangePercent >= 0 ? '+' : ''}{Number(stock.priceChangePercent).toFixed(2)}%
+                      </td>
+                      <td>{formatNumber(stock.volume)}</td>
+                      <td><span className="badge">{stock.sector}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      }
+
+      const root = document.getElementById('root');
+      ReactDOM.createRoot(root).render(<App />);
+    })();
+</script>
+</body>
+</html>
